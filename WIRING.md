@@ -1,6 +1,62 @@
-# Wiring Diagram - ESP32-S3 Walkie Talkie
 
-## Geoptimaliseerde Configuratie (Gedeelde I2S Pins)
+# Bedrading - ESP32 Walkie Talkie
+
+## Huidige configuratie (2 aparte I2S poorten)
+
+Mic en speaker hebben elk hun eigen BCLK/WS pinnen om bus-conflicten te vermijden.
+
+```
+ESP32                      INMP441 (Microfoon)
+-----                      ------------------
+GPIO 14 (I2S_MIC_BCLK) --> SCK
+GPIO 13 (I2S_MIC_WS)   --> WS
+GPIO 25 (I2S_SD_IN)    <-- SD
+3.3V                   --> VDD
+GND                    --> GND
+GND                    --> L/R  (Left channel)
+
+ESP32                      MAX98357A (Speaker)
+-----                      ------------------
+GPIO 4  (I2S_SPK_BCLK) --> BCLK
+GPIO 17 (I2S_SPK_WS)   --> LRC
+GPIO 26 (I2S_SD_OUT)   --> DIN
+5V                     --> VIN
+GND                    --> GND
+[Float/los laten]      --> GAIN  (12dB)
+
+ESP32                      Button
+-----                      ------
+GPIO 27                --> Een kant
+GND                    --> Andere kant
+```
+
+## Pinout samenvatting
+`
+| GPIO | Functie           | Verbonden met        |
+|------|-------------------|----------------------|
+| 4    | I2S_SPK_BCLK      | MAX98357A BCLK       |
+| 13   | I2S_MIC_WS        | INMP441 WS           |
+| 14   | I2S_MIC_BCLK      | INMP441 SCK          |
+| 17   | I2S_SPK_WS        | MAX98357A LRC        |
+| 25   | I2S_SD_IN         | INMP441 SD           |
+| 26   | I2S_SD_OUT        | MAX98357A DIN        |
+| 27   | Button (INPUT_PULLUP) | Knop naar GND    |
+
+## Power
+
+| Pin  | Spanning | Verbonden met                    |
+|------|----------|----------------------------------|
+| 3.3V | 3.3V     | INMP441 VDD                      |
+| 5V   | 5V       | MAX98357A VIN                    |
+| GND  | GND      | Alle GND pinnen (common ground!) |
+
+## Gain instelling MAX98357A
+
+| GAIN verbinding | Versterking |
+|-----------------|-------------|
+| GND             | 6 dB        |
+| Float (los)     | 9 dB        |
+| 100k naar VDD   | 12 dB       |
 
 ```
                     ┌───────────────────────────────┐
@@ -12,9 +68,9 @@
     │               │  │                         │  │
     │  ┌────────────┼──┤ GPIO 5 (I2S WS/LRCLK)  │  │
     │  │            │  │                         │  │
-    │  │  ┌─────────┼──┤ GPIO 6 (I2S SD_IN)     │  │
+    │  │  ┌─────────┼──┤ GPIO 25 (I2S SD_IN)    │  │
     │  │  │         │  │                         │  │
-    │  │  │    ┌────┼──┤ GPIO 7 (I2S SD_OUT)    │  │
+    │  │  │    ┌────┼──┤ GPIO 26 (I2S SD_OUT)   │  │
     │  │  │    │    │  │                         │  │
     │  │  │    │    │  │ GPIO 0 (BUTTON)        ├──┼───[Button]───GND
     │  │  │    │    │  │                         │  │
