@@ -10,7 +10,7 @@ ESP32                      INMP441 (Microfoon)
 -----                      ------------------
 GPIO 14 (I2S_MIC_BCLK) --> SCK
 GPIO 13 (I2S_MIC_WS)   --> WS
-GPIO 25 (I2S_SD_IN)    <-- SD
+GPIO 35 (I2S_SD_IN)    <-- SD
 3.3V                   --> VDD
 GND                    --> GND
 GND                    --> L/R  (Left channel)
@@ -38,7 +38,7 @@ GND                    --> Andere kant
 | 13   | I2S_MIC_WS        | INMP441 WS           |
 | 14   | I2S_MIC_BCLK      | INMP441 SCK          |
 | 17   | I2S_SPK_WS        | MAX98357A LRC        |
-| 25   | I2S_SD_IN         | INMP441 SD           |
+| 35   | I2S_SD_IN (input-only) | INMP441 SD       |
 | 26   | I2S_SD_OUT        | MAX98357A DIN        |
 | 27   | Button (INPUT_PULLUP) | Knop naar GND    |
 
@@ -68,7 +68,7 @@ GND                    --> Andere kant
     │               │  │                         │  │
     │  ┌────────────┼──┤ GPIO 5 (I2S WS/LRCLK)  │  │
     │  │            │  │                         │  │
-    │  │  ┌─────────┼──┤ GPIO 25 (I2S SD_IN)    │  │
+    │  │  ┌─────────┼──┤ GPIO 35 (I2S SD_IN)    │  │
     │  │  │         │  │                         │  │
     │  │  │    ┌────┼──┤ GPIO 26 (I2S SD_OUT)   │  │
     │  │  │    │    │  │                         │  │

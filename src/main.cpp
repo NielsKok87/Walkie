@@ -13,7 +13,7 @@
  * INMP441 (Microfoon) - I2S_NUM_0:
  *   SCK  -> GPIO 14 (I2S_MIC_BCLK)
  *   WS   -> GPIO 13 (I2S_MIC_WS)
- *   SD   -> GPIO 25 (I2S_SD_IN)
+ *   SD   -> GPIO 35 (I2S_SD_IN)
  *   L/R  -> GND     (Left channel)
  *   VDD  -> 3.3V
  *   GND  -> GND
@@ -27,7 +27,7 @@
  *   GND  -> GND
  *
  * Button:
- *   Een kant  -> GPIO 27
+ *   Een kant  -> GPIO 23
  *   Andere kant -> GND
  *
  * Core 0: ESP-NOW protocol & netwerk
@@ -47,12 +47,12 @@
 // Pin Definitions
 // ============================================================================
 
-#define BUTTON_PIN 27 // Push-to-talk button (GPIO 0 is strapping pin, vermijd!)
+#define BUTTON_PIN 23 // Push-to-talk button
 
 // I2S Microphone pins (INMP441) - I2S_NUM_0
 #define I2S_MIC_BCLK 14 // Bit Clock voor mic
 #define I2S_MIC_WS 13   // Word Select voor mic
-#define I2S_SD_IN 25    // Serial Data van mic
+#define I2S_SD_IN 35    // Serial Data van mic (GPIO 35 = input-only, veilig voor I2S RX)
 
 // I2S Speaker pins (MAX98357A) - I2S_NUM_1
 #define I2S_SPK_BCLK 4 // Bit Clock voor speaker
@@ -67,6 +67,7 @@
 #define SAMPLE_BITS 16        // 16-bit samples
 #define AUDIO_BUFFER_SIZE 120 // Samples per buffer (120 * 2 = 240 bytes, past in 1 ESP-NOW pakket)
 #define ESP_NOW_MAX_DATA 250  // Maximum ESP-NOW packet size
+#define MIC_GAIN 4            // Microphone gain multiplier (1 = geen versterking, 4 = 4x)
 
 // ============================================================================
 // Queue Configuration
@@ -120,7 +121,8 @@ unsigned long packetsSent = 0;
 volatile int lastRSSI = -100; // RSSI van het laatste ontvangen pakket
 
 // Promiscuous callback: pikt RSSI op van alle ontvangen WiFi frames
-void promiscuousRSSI(void *buf, wifi_promiscuous_pkt_type_t type) {
+void promiscuousRSSI(void *buf, wifi_promiscuous_pkt_type_t type)
+{
   wifi_promiscuous_pkt_t *pkt = (wifi_promiscuous_pkt_t *)buf;
   lastRSSI = pkt->rx_ctrl.rssi;
 }
@@ -283,6 +285,16 @@ void audioTxTask(void *parameter)
       if (bytes_read > 0)
       {
         txBuffer.size = bytes_read / 2;
+        // Apply microphone gain with clipping
+        for (size_t i = 0; i < txBuffer.size; i++)
+        {
+          int32_t sample = (int32_t)txBuffer.data[i] * MIC_GAIN;
+          if (sample > 32767)
+            sample = 32767;
+          if (sample < -32768)
+            sample = -32768;
+          txBuffer.data[i] = (int16_t)sample;
+        }
         xQueueSend(audioTxQueue, &txBuffer, portMAX_DELAY);
       }
     }
@@ -333,6 +345,195 @@ void networkTask(void *parameter)
   }
 }
 
+#define STRINGIZE_(x) #x
+#define STRINGIZE(x) STRINGIZE_(x)
+
+// ============================================================================
+// Hardware Test (eenmalig in setup)
+// ============================================================================
+
+void testHardware()
+{
+  Serial.println("\n--- Hardware Test ---");
+
+  // --- Speaker test: 1kHz piep gedurende 0.5s ---
+  Serial.println("[SPK] 1kHz piep 0.5s...");
+  const int beepSamples = SAMPLE_RATE / 2;
+  int16_t buf[AUDIO_BUFFER_SIZE];
+  int samplesLeft = beepSamples;
+  int sampleIdx = 0;
+  while (samplesLeft > 0)
+  {
+    int chunk = (samplesLeft < AUDIO_BUFFER_SIZE) ? samplesLeft : AUDIO_BUFFER_SIZE;
+    for (int i = 0; i < chunk; i++)
+    {
+      buf[i] = (int16_t)(sinf(2.0f * M_PI * 1000.0f * (sampleIdx + i) / SAMPLE_RATE) * 16000);
+    }
+    size_t written;
+    i2s_write(I2S_PORT_SPK, buf, chunk * 2, &written, portMAX_DELAY);
+    sampleIdx += chunk;
+    samplesLeft -= chunk;
+  }
+  Serial.println("[SPK] klaar - hoorde je een piep? Dan OK");
+  delay(500);
+
+  // --- Korte piep als "klaar om op te nemen" signaal ---
+  for (int b = 0; b < 2; b++)
+  {
+    int beepLen = SAMPLE_RATE / 10; // 100ms piep
+    int bIdx = 0;
+    int bLeft = beepLen;
+    while (bLeft > 0)
+    {
+      int chunk = (bLeft < AUDIO_BUFFER_SIZE) ? bLeft : AUDIO_BUFFER_SIZE;
+      for (int i = 0; i < chunk; i++)
+        buf[i] = (int16_t)(sinf(2.0f * M_PI * 1500.0f * (bIdx + i) / SAMPLE_RATE) * 12000);
+      size_t w;
+      i2s_write(I2S_PORT_SPK, buf, chunk * 2, &w, portMAX_DELAY);
+      bIdx += chunk;
+      bLeft -= chunk;
+    }
+    delay(100); // pauze tussen piepjes
+  }
+  delay(200); // even wachten voor opname start
+
+  // --- Mic loopback test: 2s opnemen, dan afspelen met hoge gain ---
+  // Alloceer opnamebuffer op heap (2s @ 16kHz @ 16bit = 64000 bytes)
+  const int recordSamples = SAMPLE_RATE * 2; // 2 seconden
+  int16_t *recBuf = (int16_t *)malloc(recordSamples * 2);
+  if (recBuf != NULL)
+  {
+    Serial.println("[MIC] opnemen 2s - spreek iets...");
+    int recorded = 0;
+    int32_t peak = 0;
+    while (recorded < recordSamples)
+    {
+      size_t bytesRead;
+      int toRead = recordSamples - recorded;
+      if (toRead > AUDIO_BUFFER_SIZE)
+        toRead = AUDIO_BUFFER_SIZE;
+      i2s_read(I2S_PORT_MIC, recBuf + recorded, toRead * 2, &bytesRead, portMAX_DELAY);
+      int n = bytesRead / 2;
+      for (int i = 0; i < n; i++)
+      {
+        int32_t s = abs((int32_t)recBuf[recorded + i]);
+        if (s > peak)
+          peak = s;
+      }
+      recorded += n;
+    }
+    Serial.printf("[MIC] piek=%ld\n", peak);
+
+    // Bereken playback gain: schaal zo dat piek ~70% van max wordt (min 4x, max 64x)
+    int32_t playGain = (peak > 0) ? (23000L / peak) : 32;
+    if (playGain < 4)
+      playGain = 4;
+    if (playGain > 64)
+      playGain = 64;
+    Serial.printf("[SPK] afspelen met gain=%ld...\n", playGain);
+
+    int played = 0;
+    while (played < recorded)
+    {
+      int toWrite = recorded - played;
+      if (toWrite > AUDIO_BUFFER_SIZE)
+        toWrite = AUDIO_BUFFER_SIZE;
+      // Pas gain toe met clipping
+      for (int i = 0; i < toWrite; i++)
+      {
+        int32_t s = (int32_t)recBuf[played + i] * playGain;
+        if (s > 32767)
+          s = 32767;
+        if (s < -32768)
+          s = -32768;
+        buf[i] = (int16_t)s;
+      }
+      size_t written;
+      i2s_write(I2S_PORT_SPK, buf, toWrite * 2, &written, portMAX_DELAY);
+      played += toWrite;
+    }
+    free(recBuf);
+  }
+  else
+  {
+    Serial.println("[MIC] malloc mislukt, loopback overgeslagen");
+  }
+
+  // --- Button test: wacht max 5s op druk, geef audio feedback ---
+  Serial.println("[BTN] druk de knop binnen 5 seconden...");
+  // Aankondiging: snelle dubbele piep
+  for (int b = 0; b < 2; b++)
+  {
+    int bLen = SAMPLE_RATE / 20; // 50ms
+    int bIdx = 0, bLeft = bLen;
+    while (bLeft > 0)
+    {
+      int chunk = (bLeft < AUDIO_BUFFER_SIZE) ? bLeft : AUDIO_BUFFER_SIZE;
+      for (int i = 0; i < chunk; i++)
+        buf[i] = (int16_t)(sinf(2.0f * M_PI * 2000.0f * (bIdx + i) / SAMPLE_RATE) * 12000);
+      size_t w;
+      i2s_write(I2S_PORT_SPK, buf, chunk * 2, &w, portMAX_DELAY);
+      bIdx += chunk;
+      bLeft -= chunk;
+    }
+    delay(80);
+  }
+
+  bool btnOk = false;
+  unsigned long btnDeadline = millis() + 5000;
+  while (millis() < btnDeadline)
+  {
+    if (digitalRead(BUTTON_PIN) == LOW)
+    {
+      btnOk = true;
+      break;
+    }
+    delay(10);
+  }
+
+  if (btnOk)
+  {
+    Serial.println("[BTN] OK - knop gedetecteerd");
+    // Bevestiging: twee oplopende tonen
+    float freqs[] = {800.0f, 1200.0f};
+    for (int t = 0; t < 2; t++)
+    {
+      int tLen = SAMPLE_RATE / 5; // 200ms
+      int tIdx = 0, tLeft = tLen;
+      while (tLeft > 0)
+      {
+        int chunk = (tLeft < AUDIO_BUFFER_SIZE) ? tLeft : AUDIO_BUFFER_SIZE;
+        for (int i = 0; i < chunk; i++)
+          buf[i] = (int16_t)(sinf(2.0f * M_PI * freqs[t] * (tIdx + i) / SAMPLE_RATE) * 14000);
+        size_t w;
+        i2s_write(I2S_PORT_SPK, buf, chunk * 2, &w, portMAX_DELAY);
+        tIdx += chunk;
+        tLeft -= chunk;
+      }
+      delay(50);
+    }
+  }
+  else
+  {
+    Serial.println("[BTN] NIET GEDETECTEERD (controleer bedrading GPIO " STRINGIZE(BUTTON_PIN) ")");
+    // Fout: lage lange toon
+    int tLen = SAMPLE_RATE / 2;
+    int tIdx = 0, tLeft = tLen;
+    while (tLeft > 0)
+    {
+      int chunk = (tLeft < AUDIO_BUFFER_SIZE) ? tLeft : AUDIO_BUFFER_SIZE;
+      for (int i = 0; i < chunk; i++)
+        buf[i] = (int16_t)(sinf(2.0f * M_PI * 300.0f * (tIdx + i) / SAMPLE_RATE) * 14000);
+      size_t w;
+      i2s_write(I2S_PORT_SPK, buf, chunk * 2, &w, portMAX_DELAY);
+      tIdx += chunk;
+      tLeft -= chunk;
+    }
+  }
+
+  Serial.println("--- Hardware Test Klaar ---\n");
+}
+
 // ============================================================================
 // Setup Function
 // ============================================================================
@@ -380,6 +581,9 @@ void setup()
   setupI2S_Microphone();
   setupI2S_Speaker();
   Serial.println("I2S OK (2 aparte poorten)");
+
+  // Hardware test (speaker + mic)
+  testHardware();
 
   // Initialize ESP-NOW
   Serial.println("\nInitializing ESP-NOW...");
@@ -469,7 +673,8 @@ void loop()
   if (millis() - lastStats > 3000)
   {
     Serial.printf("Sent=%lu Rcv=%lu Btn=%d", packetsSent, packetsReceived, currentButtonState);
-    if (lastRSSI > -100) {
+    if (lastRSSI > -100)
+    {
       // Log-distance padverliesdmodel: RSSI_ref=-40dBm op 1m, n=2.7 (binnen)
       float dist = pow(10.0f, (-40.0f - lastRSSI) / 27.0f);
       Serial.printf(" RSSI=%ddBm ~%.1fm", lastRSSI, dist);
